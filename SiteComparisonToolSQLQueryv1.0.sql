@@ -1,14 +1,12 @@
 ----- Site Comparison Tool Query -----
 
 WITH VIEW_1 AS (
-SELECT --country_group,
-       dc_name,
+SELECT dc_name,
        hellofresh_week,
        SUM(CASE WHEN metric_id=129 THEN (numerator_value*60)/denominator_value END) AS worked_mpb,
        SUM(CASE WHEN metric_id=50 THEN numerator_value/denominator_value END) AS production_error_rate,
        SUM(CASE WHEN metric_id=9 THEN numerator_value/denominator_value END) AS production_asl_error_rate,
        SUM(CASE WHEN metric_id=8 THEN numerator_value/denominator_value END) AS production_kit_error_rate,
-       SUM(CASE WHEN metric_id=14 THEN numerator_value END) AS rolled_boxes,
        (1-(SUM(CASE WHEN metric_id=114 THEN numerator_value END)/SUM(CASE WHEN metric_id=111 THEN numerator_value END))) AS absence_rate,
        (SUM(CASE WHEN metric='Labour Order Fulfilled  | Agency' THEN numerator_value END)/SUM(CASE WHEN metric='Labour Order Actual  | Agency' THEN numerator_value END)) AS agency_fill_rate,
        SUM(CASE WHEN metric_id=50 THEN denominator_value END) AS boxes_shipped
@@ -16,7 +14,6 @@ FROM materialized_views.isa__wbr_dashboard_layer_view
 WHERE hellofresh_year = 2024
     AND metric IN ('Worked | Hours' ---MPB
     ,'Production | Error Rate [W-1]','Production | P&P | Assembly | Error Rate [W-1]','Production | P&P | Kitting | Error Rate [W-1]' --- Errors
-    ,'Production | Warehouse | Rolled Box | Error Rate [W-1]' --- Rolled Boxes
     ,'Labour Order Fulfilled | HF','Labour Order Actual | HF' --- Absence Rate
     ,'Labour Order Fulfilled  | Agency','Labour Order Actual  | Agency' --- Agency Fill Rate
                   )
@@ -55,14 +52,6 @@ WHERE hellofresh_year>=2022
         ,IFNULL(CASE WHEN UPPER(PO.Supplier) LIKE '% BX' OR UPPER(PO.Supplier) LIKE '% VE' THEN SUBSTRING(PO.Supplier,1,LENGTH(PO.Supplier)-3) ELSE PO.Supplier END,'Unmapped') Supplier
         ,ST.prod_code as sku_code
         ,"Inventory" as source
-        /*,CASE
-        WHEN st.sla_reason_id = 'DON'
-        THEN 'DONATION'
-        WHEN st.sla_reason_id = 'DIS'
-        THEN 'DISPOSAL'
-        WHEN st.sla_reason_id = 'RES'
-        THEN 'INGREDIENTS RESALE TO PROCESSOR' --we dont have transactions yet, but might have in the future. Let's include it - Duncan
-        END as destination */
         ,LEFT(ST.prod_code, 3) as sku_category
         ,ST.tm_id as tmid
         ,ST.po_id
@@ -281,6 +270,7 @@ ON calendar.hellofresh_week = bs.hellofresh_delivery_week
 GROUP BY 1,2
 )
 
+----- This cte is to get the Waste % Gross Revenue and Waste CPB Metrics	
 , waste_gr_cpb AS (
 SELECT CASE WHEN a.dc='BX' THEN 'Barleben' WHEN a.dc='VE' THEN 'Verden' END AS distribution_center,
        a.hf_week,
@@ -297,6 +287,7 @@ GROUP BY 1,2
 ORDER BY 1,2
 )
 
+----- this cte is to get the CPB Euro metric	
 , cpb_eur AS (
 SELECT
     CASE WHEN country_group='BENELUX' THEN 'Prismalaan'
@@ -317,12 +308,8 @@ SELECT
          WHEN dc IN ('Beehive','BV') THEN 'Nuneaton'
          WHEN dc IN ('MO','NO','NO-unknown') THEN 'Oslo'
     ELSE dc END AS dc,
-    hellofresh_week AS HelloFresh_Week, --month,
-    --SUM(full_price_revenue_eur) AS Gross_Revenue_Eur,
-    --SUM(total_pnp_costs_eur) AS Total_PNP_Costs_Eur,
-    --SUM(box_count) AS Box_Count,
+    hellofresh_week AS HelloFresh_Week, 
     SUM(total_pnp_costs_eur)/SUM(box_count) AS cpb_eur
-    --SUM(total_pnp_costs_eur)/SUM(full_price_revenue_eur) AS Percentage_Gross_Revenue
 FROM materialized_views.global_pc2_dashboard
 WHERE cluster = 'International'
     AND dc NOT IN ('TFB WA','DE-unknown','TK-unknown','TV-unknown','AO-unknown','AU-unknown','Derby','YE-unknown','GB-undefined','Derby','Moss')
@@ -331,13 +318,47 @@ GROUP BY 1,2
 ORDER BY 1,2
 )
 
+--- source for the assembly throughput metric for Barleben      
+, bx_asl_tph_1 AS (
+SELECT mapped_dc,
+    area_left_date,
+    hellofresh_week,
+    area_left_hour,
+    SUM(boxes_finished_per_minute) AS boxes_finished_per_minute
+FROM materialized_views.hybrid_line_boxes_per_area_per_minute
+WHERE area_left_date BETWEEN '2024-01-01' AND '2024-12-31' AND area_left_hour NOT IN (0,1,2,22,23)
+GROUP BY 1,2,3,4
+)
+
+, bx_asl_tph_2 AS (
+SELECT mapped_dc,
+       hellofresh_week,
+       AVG(boxes_finished_per_minute) AS boxes_finished_per_minute
+FROM bx_asl_tph_1
+WHERE mapped_dc='Barleben' AND hellofresh_week>='2024-W01'
+GROUP BY 1,2
+ORDER BY 1,2
+)
+
+--- source for the assembly throughput metric for Verden   
+, ve_asl_tph AS (
+SELECT
+  mapped_dc,
+  hellofresh_week,
+  weighted_throughput_per_dc AS assembly_throughput_ve
+FROM materialized_views.prod_db_executive_summary
+WHERE hellofresh_week>='2024-W01' AND mapped_dc='Verden'
+ORDER BY 1,2
+)
 
 SELECT a.*,
        b.waste_percentage_GR,
        b.overkitting_cpb,
        b.inventory_cpb,
        b.waste_CPB,
-       c.cpb_eur
+       c.cpb_eur,
+       d.boxes_finished_per_minute,
+       e.assembly_throughput_ve
 FROM VIEW_1 AS a
 LEFT JOIN waste_gr_cpb AS b
     ON a.dc_name=b.distribution_center
@@ -345,4 +366,11 @@ LEFT JOIN waste_gr_cpb AS b
 LEFT JOIN cpb_eur AS c
     ON a.dc_name=c.dc
     AND a.hellofresh_week=c.HelloFresh_Week
+LEFT JOIN bx_asl_tph_2 AS d
+    ON a.dc_name=d.mapped_dc
+    AND a.hellofresh_week=d.hellofresh_week
+LEFT JOIN ve_asl_tph AS e
+    ON a.dc_name=e.mapped_dc
+    AND a.hellofresh_week=e.hellofresh_week
+WHERE a.dc_name IN ('Barleben','Verden') AND a.hellofresh_week<='2024-W21'
 ORDER BY 1,2
