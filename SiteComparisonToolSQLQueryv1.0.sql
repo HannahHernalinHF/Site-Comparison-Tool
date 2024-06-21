@@ -1,23 +1,56 @@
 ----- Site Comparison Tool Query -----
 
 WITH VIEW_1 AS (
-SELECT dc_name,
+SELECT --country_group,
+       dc_name,
        hellofresh_week,
        SUM(CASE WHEN metric_id=129 THEN (numerator_value*60)/denominator_value END) AS worked_mpb,
+       SUM(CASE WHEN metric_id=130 THEN (numerator_value*60)/denominator_value END) AS support_mpb,
+       SUM(CASE WHEN metric_id=131 THEN (numerator_value*60)/denominator_value END) AS production_mpb,
        SUM(CASE WHEN metric_id=50 THEN numerator_value/denominator_value END) AS production_error_rate,
        SUM(CASE WHEN metric_id=9 THEN numerator_value/denominator_value END) AS production_asl_error_rate,
        SUM(CASE WHEN metric_id=8 THEN numerator_value/denominator_value END) AS production_kit_error_rate,
+       SUM(CASE WHEN metric_id=14 THEN numerator_value END) AS rolled_boxes,
        (1-(SUM(CASE WHEN metric_id=114 THEN numerator_value END)/SUM(CASE WHEN metric_id=111 THEN numerator_value END))) AS absence_rate,
        (SUM(CASE WHEN metric='Labour Order Fulfilled  | Agency' THEN numerator_value END)/SUM(CASE WHEN metric='Labour Order Actual  | Agency' THEN numerator_value END)) AS agency_fill_rate,
-       SUM(CASE WHEN metric_id=50 THEN denominator_value END) AS boxes_shipped
+       SUM(CASE WHEN metric_id=50 THEN denominator_value END) AS boxes_shipped,
+       SUM(CASE WHEN metric_id=56 THEN numerator_value END) AS boxes_produced,
+       SUM(CASE WHEN metric_id=3 THEN numerator_value/denominator_value END) AS mealkit_overproduction,
+       (
+        (
+            SUM(CASE WHEN metric LIKE 'Voluntary Leavers | HF' THEN numerator_value ELSE 0 END)
+                +
+            SUM(CASE WHEN metric='Involuntary Leavers | HF' THEN numerator_value ELSE 0 END)
+        )
+            /
+        SUM(CASE WHEN metric='Active Headcount | HF' THEN numerator_value ELSE 0 END)
+             ) AS hf_attrition_rate,
+       (
+        (
+            SUM(CASE WHEN metric='Voluntary Leavers  | Agency' THEN numerator_value ELSE 0 END)
+                +
+            SUM(CASE WHEN metric='Involuntary Leavers  | Agency' THEN numerator_value ELSE 0 END)
+        )
+            /
+        SUM(CASE WHEN metric='Active Headcount  | Agency' THEN numerator_value ELSE 0 END)
+             ) AS agency_attrition_rate,
+       SUM(CASE WHEN metric_id=129 THEN targets END) AS worked_mpb_target,
+       SUM(CASE WHEN metric_id=130 THEN targets END) AS support_mpb_target,
+       SUM(CASE WHEN metric_id=131 THEN targets END) AS production_mpb_target,
+       SUM(CASE WHEN metric_id=50 THEN targets END) AS production_error_rate_target,
+       SUM(CASE WHEN metric_id=9 THEN targets END) AS production_asl_error_rate_target,
+       SUM(CASE WHEN metric_id=8 THEN targets END) AS production_kit_error_rate_target
 FROM materialized_views.isa__wbr_dashboard_layer_view
-WHERE hellofresh_year = 2024
-    AND metric IN ('Worked | Hours' ---MPB
+WHERE hellofresh_year >= 2024
+    AND metric IN ('Worked | Hours','Worked | Production | Hours','Worked | Support | Hours' ---MPB
     ,'Production | Error Rate [W-1]','Production | P&P | Assembly | Error Rate [W-1]','Production | P&P | Kitting | Error Rate [W-1]' --- Errors
     ,'Labour Order Fulfilled | HF','Labour Order Actual | HF' --- Absence Rate
     ,'Labour Order Fulfilled  | Agency','Labour Order Actual  | Agency' --- Agency Fill Rate
-                  )
-    --AND dc_name IN ('Barleben','Verden')--AND dc_name<>'Windmill'
+    ,'Voluntary Leavers | HF','Involuntary Leavers | HF','Active Headcount | HF','Voluntary Leavers  | Agency','Involuntary Leavers  | Agency','Active Headcount  | Agency' --- Attrition Rate
+    ,'Box Produced'
+    ,'Mealkit Overproduction'
+    , 'Production | Warehouse | Rolled Box | Error Rate [W-1]')
+    AND dc_name IN ('Barleben','Verden')--AND dc_name<>'Windmill'
 GROUP BY 1,2
 ORDER BY 1,2
 )
@@ -270,7 +303,6 @@ ON calendar.hellofresh_week = bs.hellofresh_delivery_week
 GROUP BY 1,2
 )
 
------ This cte is to get the Waste % Gross Revenue and Waste CPB Metrics	
 , waste_gr_cpb AS (
 SELECT CASE WHEN a.dc='BX' THEN 'Barleben' WHEN a.dc='VE' THEN 'Verden' END AS distribution_center,
        a.hf_week,
@@ -282,12 +314,11 @@ FROM waste_inventory AS a
 LEFT JOIN revenue_boxcount AS b
     ON a.dc=b.distribution_center
     AND a.hf_week=b.hellofresh_delivery_week
-WHERE a.hf_week LIKE '2024%' AND b.hellofresh_delivery_week LIKE '2024%'
+WHERE a.hf_week >= '2023-W01' AND b.hellofresh_delivery_week>='2023-W01'--a.hf_week LIKE '2024%' AND b.hellofresh_delivery_week LIKE '2024%'
 GROUP BY 1,2
 ORDER BY 1,2
 )
 
------ this cte is to get the CPB Euro metric	
 , cpb_eur AS (
 SELECT
     CASE WHEN country_group='BENELUX' THEN 'Prismalaan'
@@ -308,7 +339,7 @@ SELECT
          WHEN dc IN ('Beehive','BV') THEN 'Nuneaton'
          WHEN dc IN ('MO','NO','NO-unknown') THEN 'Oslo'
     ELSE dc END AS dc,
-    hellofresh_week AS HelloFresh_Week, 
+    hellofresh_week AS HelloFresh_Week,
     SUM(total_pnp_costs_eur)/SUM(box_count) AS cpb_eur
 FROM materialized_views.global_pc2_dashboard
 WHERE cluster = 'International'
@@ -318,7 +349,7 @@ GROUP BY 1,2
 ORDER BY 1,2
 )
 
---- source for the assembly throughput metric for Barleben      
+--- source for the assembly throughput metric for Barleben
 , bx_asl_tph_1 AS (
 SELECT mapped_dc,
     area_left_date,
@@ -340,7 +371,7 @@ GROUP BY 1,2
 ORDER BY 1,2
 )
 
---- source for the assembly throughput metric for Verden   
+--- source for the assembly throughput metric for Verden
 , ve_asl_tph AS (
 SELECT
   mapped_dc,
@@ -351,6 +382,49 @@ WHERE hellofresh_week>='2024-W01' AND mapped_dc='Verden'
 ORDER BY 1,2
 )
 
+--- source for the 2 metrics: Critical Pull Time (CPT) Routes Over Time and Product Complexity
+
+, bagsize_recipe AS ( -- this CTE is to calculate the unique core recipes which are a combination of bag size and every meal_swap
+    SELECT hf_week,
+           bag_size,
+           TRIM(recipe) AS recipe,
+           lane_by_delivery_time
+    FROM uploads.opsbi_de_pdl_sequence_trackingdata_at_de
+        LATERAL VIEW explode(split(meal_swap, ' ')) AS recipe
+    WHERE hf_week>='2024-W01' AND distribution_center = 'BX'
+)
+
+, recipes AS ( -- this CTE is to calculate the unique add-on recipes which are a combination of bag size and every meal_swap_addon_long
+    SELECT hf_week,
+        TRIM(recipe) AS recipe
+    FROM uploads.opsbi_de_pdl_sequence_trackingdata_at_de
+    LATERAL VIEW explode(split(meal_swap_addon_long, '-')) AS recipe
+    WHERE hf_week>='2024-W01' AND distribution_center = 'BX'
+)
+
+, addons AS ( -- this CTE is to segregate the meal kit add ons and HFM add ons.
+    SELECT hf_week,
+           CASE WHEN LENGTH(recipe) = 3 THEN recipe END AS mealkit_addons,
+           CASE WHEN LENGTH(recipe) = 4 THEN recipe END AS hfm_addons
+    FROM recipes
+    GROUP BY 1,recipe
+)
+
+, cpt_pc AS ( -- this CTE is to calculate the weelky Critical Pull Time (CPT) Routes Over Time and Product Complexity for Barleben
+SELECT a.hf_week,
+       "Barleben" AS dc_name,
+       COUNT(DISTINCT a.lane_by_delivery_time) AS CPT,
+       --COUNT(DISTINCT concat(a.bag_size,a.recipe)) AS recipes,
+       --COUNT(DISTINCT b.mealkit_addons) AS mealkit_addons,
+       --COUNT(DISTINCT b.hfm_addons) AS hfm_addons,
+       (COUNT(DISTINCT concat(a.bag_size,a.recipe)) + COUNT(DISTINCT b.mealkit_addons) + COUNT(DISTINCT b.hfm_addons))  AS product_complexity
+FROM bagsize_recipe AS a
+LEFT JOIN addons AS b
+    ON a.hf_week=b.hf_week
+GROUP BY 1,2
+ORDER BY 1
+    )
+
 SELECT a.*,
        b.waste_percentage_GR,
        b.overkitting_cpb,
@@ -358,7 +432,9 @@ SELECT a.*,
        b.waste_CPB,
        c.cpb_eur,
        d.boxes_finished_per_minute,
-       e.assembly_throughput_ve
+       e.assembly_throughput_ve,
+       f.CPT,
+       f.product_complexity
 FROM VIEW_1 AS a
 LEFT JOIN waste_gr_cpb AS b
     ON a.dc_name=b.distribution_center
@@ -372,5 +448,8 @@ LEFT JOIN bx_asl_tph_2 AS d
 LEFT JOIN ve_asl_tph AS e
     ON a.dc_name=e.mapped_dc
     AND a.hellofresh_week=e.hellofresh_week
-WHERE a.dc_name IN ('Barleben','Verden') AND a.hellofresh_week<='2024-W21'
+LEFT JOIN cpt_pc AS f
+    ON a.dc_name=f.dc_name
+    AND a.hellofresh_week=f.hf_week
+WHERE a.dc_name IN ('Barleben','Verden')
 ORDER BY 1,2
